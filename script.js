@@ -1,175 +1,365 @@
 // --- 1. GAME CONSTANTS AND VARIABLES ---
 const ROWS = 7;
 const COLS = 9;
-const SHIP_SIZES = [5, 4, 3, 3, 2]; // The 5 ships we need to place
+const SHIP_SIZES = [5, 4, 3, 3, 2];
 
-let currentPlayer = 1;      // Start with Player 1
-let gameState = "placement"; // Can be "placement" or "battle"
-let currentShipIndex = 0;   // Which ship from SHIP_SIZES is being placed
-let isHorizontal = true;    // Placement direction
+// Multiplayer state
+let ws = null;
+let playerNumber = null;
+let roomCode = null;
+let isConnected = false;
 
-// Grids: 0=water, 1=ship, 2=miss, 3=hit
-let p1Board = Array(ROWS).fill().map(() => Array(COLS).fill(0));
-let p2Board = Array(ROWS).fill().map(() => Array(COLS).fill(0));
+// Game state
+let gameState = {
+    phase: 'lobby', // lobby, placement, battle
+    currentPlayer: 1,
+    currentShipIndex: 0,
+    isHorizontal: true,
+    myBoard: Array(ROWS).fill().map(() => Array(COLS).fill(0)),
+    enemyBoard: Array(ROWS).fill().map(() => Array(COLS).fill(0)),
+    myTurn: false
+};
 
-// --- 2. INITIALIZATION ---
-function createGrid(playerNum) {
-    const gridElement = document.getElementById(`p${playerNum}-grid`);
+// --- 2. WEBSOCKET CONNECTION ---
+function connectToServer() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}`;
+    
+    ws = new WebSocket(wsUrl);
+    
+    ws.onopen = () => {
+        console.log('Connected to server');
+        isConnected = true;
+        hideOverlay();
+    };
+    
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        handleServerMessage(data);
+    };
+    
+    ws.onclose = () => {
+        console.log('Disconnected from server');
+        isConnected = false;
+        showOverlay('CONNECTION LOST', 'Trying to reconnect...');
+        setTimeout(connectToServer, 3000);
+    };
+    
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        showOverlay('CONNECTION ERROR', 'Failed to connect to server');
+    };
+}
+
+// --- 3. SERVER MESSAGE HANDLING ---
+function handleServerMessage(data) {
+    switch (data.type) {
+        case 'roomCreated':
+            roomCode = data.roomCode;
+            playerNumber = data.playerNumber;
+            showRoomInfo();
+            break;
+            
+        case 'roomJoined':
+            roomCode = data.roomCode;
+            playerNumber = data.playerNumber;
+            showRoomInfo();
+            break;
+            
+        case 'playerJoined':
+            updatePlayerCount(data.totalPlayers);
+            if (data.totalPlayers === 2) {
+                document.getElementById('connection-status').textContent = 'Opponent connected! Starting game...';
+            }
+            break;
+            
+        case 'gameStart':
+            gameState.phase = 'placement';
+            gameState.myTurn = (data.playerNumber === playerNumber);
+            setTimeout(() => {
+                showGameScreen();
+                initializeGame();
+            }, 1000);
+            break;
+            
+        case 'placementComplete':
+            if (data.nextPlayer === playerNumber) {
+                gameState.myTurn = true;
+                gameState.currentShipIndex = 0;
+                updateInstruction();
+            }
+            break;
+            
+        case 'shipPlaced':
+            if (data.playerNumber === playerNumber) {
+                gameState.myBoard = data.board;
+                gameState.currentShipIndex++;
+                updateInstruction();
+            }
+            refreshVisuals();
+            break;
+            
+        case 'battleStart':
+            gameState.phase = 'battle';
+            gameState.myTurn = (data.playerNumber === playerNumber);
+            showBattlePhase();
+            break;
+            
+        case 'shotFired':
+            const isMyBoard = (data.playerNumber !== playerNumber);
+            const targetBoard = isMyBoard ? gameState.myBoard : gameState.enemyBoard;
+            
+            // Update the board with shot result
+            if (data.hit) {
+                targetBoard[data.row][data.col] = 3; // Hit
+            } else {
+                targetBoard[data.row][data.col] = 2; // Miss
+            }
+            
+            if (isMyBoard) {
+                gameState.myBoard = targetBoard;
+            } else {
+                gameState.enemyBoard = targetBoard;
+            }
+            
+            refreshVisuals();
+            
+            if (data.gameOver) {
+                showGameOver(data.playerNumber === playerNumber);
+            } else {
+                gameState.myTurn = (data.nextPlayer === playerNumber);
+                updateInstruction();
+            }
+            break;
+            
+        case 'error':
+            alert(data.message);
+            break;
+    }
+}
+
+// --- 4. UI MANAGEMENT ---
+function showOverlay(title, message) {
+    document.getElementById('overlay-title').textContent = title;
+    document.getElementById('overlay-message').textContent = message;
+    document.getElementById('connection-overlay').classList.remove('hidden');
+}
+
+function hideOverlay() {
+    document.getElementById('connection-overlay').classList.add('hidden');
+}
+
+function showRoomInfo() {
+    document.getElementById('room-info').classList.remove('hidden');
+    document.getElementById('current-room-code').textContent = roomCode;
+    document.getElementById('player-count').textContent = '1';
+}
+
+function updatePlayerCount(count) {
+    document.getElementById('player-count').textContent = count;
+}
+
+function showGameScreen() {
+    document.getElementById('lobby-screen').classList.add('hidden');
+    document.getElementById('game-screen').classList.remove('hidden');
+    document.getElementById('game-room-code').textContent = roomCode;
+}
+
+function showBattlePhase() {
+    document.getElementById('p1-area').querySelector('h3').textContent = 'Your Ocean';
+    document.getElementById('p2-area').classList.remove('hidden');
+    updateInstruction();
+}
+
+function showGameOver(won) {
+    const message = won ? 'YOU WIN!' : 'YOU LOSE!';
+    document.getElementById('instruction-text').textContent = message;
+    gameState.phase = 'gameOver';
+}
+
+// --- 5. GAME INITIALIZATION ---
+function initializeGame() {
+    createGrid('p1');
+    createGrid('p2');
+    updateInstruction();
+    refreshVisuals();
+}
+
+function createGrid(playerId) {
+    const gridElement = document.getElementById(`${playerId}-grid`);
+    gridElement.innerHTML = ''; // Clear existing grid
+    
     for (let r = 0; r < ROWS; r++) {
         for (let c = 0; c < COLS; c++) {
             const cell = document.createElement("div");
             cell.classList.add("cell");
-            // Store coordinates in the HTML element so we know where the user clicked
             cell.dataset.row = r;
             cell.dataset.col = c;
-            cell.addEventListener("click", () => handleInput(r, c));
+            cell.addEventListener("click", () => handleCellClick(r, c));
             gridElement.appendChild(cell);
         }
     }
 }
 
-// --- 3. CORE LOGIC FUNCTIONS ---
-
-// Decides whether to place a ship or fire a shot based on the Game State
-function handleInput(r, c) {
-    if (gameState === "placement") {
-        placeShip(r, c);
-    } else {
-        fireShot(r, c);
-    }
-}
-
-function placeShip(r, c) {
-    const board = (currentPlayer === 1) ? p1Board : p2Board;
-    const size = SHIP_SIZES[currentShipIndex];
-
-    // Check if the ship fits and isn't overlapping
-    if (canPlace(board, r, c, size)) {
-        for (let i = 0; i < size; i++) {
-            if (isHorizontal) board[r][c + i] = 1;
-            else board[r + i][c] = 1;
-        }
-        
-        refreshVisuals();
-        currentShipIndex++;
-
-        // If all 5 ships are placed, move to next player or start battle
-        if (currentShipIndex >= SHIP_SIZES.length) {
-            if (currentPlayer === 1) startTransition(2, "Player 2: Place Ships");
-            else {
-                gameState = "battle";
-                startTransition(1, "BATTLE BEGINS!");
-            }
-        } else {
-            updateInstruction();
-        }
-    }
-}
-
-function fireShot(r, c) {
-    // Current player attacks the OTHER player's board
-    const targetBoard = (currentPlayer === 1) ? p2Board : p1Board;
-
-    if (targetBoard[r][c] > 1) return; // Prevent clicking same spot twice
-
-    if (targetBoard[r][c] === 1) {
-        targetBoard[r][c] = 3; // Hit
-        alert("DIRECT HIT!");
-    } else {
-        targetBoard[r][c] = 2; // Miss
-        alert("YOU MISSED!");
-    }
-
-    if (checkGameOver(targetBoard)) {
-        document.getElementById("instruction-text").innerText = `PLAYER ${currentPlayer} WINS!`;
-        alert(`Congratulations Player ${currentPlayer}!`);
-    } else {
-        let nextPlayer = (currentPlayer === 1) ? 2 : 1;
-        startTransition(nextPlayer, `Player ${nextPlayer}'s Turn`);
-    }
-}
-
-// Check if a board has any ship pieces (1s) left
-function checkGameOver(board) {
-    return !board.some(row => row.includes(1));
-}
-
-// --- 4. UTILITY FUNCTIONS ---
-
-function canPlace(board, r, c, size) {
-    if (isHorizontal) {
-        if (c + size > COLS) return false; // Out of bounds
-        for (let i = 0; i < size; i++) if (board[r][c + i] === 1) return false; // Overlap
-    } else {
-        if (r + size > ROWS) return false;
-        for (let i = 0; i < size; i++) if (board[r + i][c] === 1) return false;
-    }
-    return true;
-}
-
-function startTransition(nextPlayer, message) {
-    const overlay = document.getElementById("pass-device-screen");
-    const timerText = document.getElementById("countdown-timer");
-    overlay.classList.remove("hidden");
+// --- 6. GAME LOGIC ---
+function handleCellClick(r, c) {
+    if (!isConnected) return;
     
-    let seconds = 5;
-    timerText.innerText = seconds;
-
-    const interval = setInterval(() => {
-        seconds--;
-        timerText.innerText = seconds;
-        if (seconds === 0) {
-            clearInterval(interval);
-            overlay.classList.add("hidden");
-            switchTurns(nextPlayer);
+    if (gameState.phase === 'placement' && gameState.myTurn) {
+        sendPlacementMove(r, c);
+    } else if (gameState.phase === 'battle' && gameState.myTurn) {
+        // Only allow clicking on enemy board during battle
+        if (event.target.closest('#p2-grid')) {
+            sendBattleMove(r, c);
         }
-    }, 1000);
+    }
 }
 
-function switchTurns(nextPlayer) {
-    currentPlayer = nextPlayer;
-    currentShipIndex = 0;
+function sendPlacementMove(r, c) {
+    ws.send(JSON.stringify({
+        type: 'gameMove',
+        row: r,
+        col: c,
+        isHorizontal: gameState.isHorizontal
+    }));
+}
 
-    // Toggle which board container is visible
-    document.getElementById("p1-area").classList.toggle("hidden", currentPlayer !== 1);
-    document.getElementById("p2-area").classList.toggle("hidden", currentPlayer !== 2);
-
-    updateInstruction();
-    refreshVisuals();
+function sendBattleMove(r, c) {
+    ws.send(JSON.stringify({
+        type: 'gameMove',
+        row: r,
+        col: c
+    }));
 }
 
 function refreshVisuals() {
-    const board = (currentPlayer === 1) ? p1Board : p2Board;
-    const gridId = `p${currentPlayer}-grid`;
-    const cells = document.querySelectorAll(`#${gridId} .cell`);
-
-    cells.forEach(cell => {
-        const r = cell.dataset.row;
-        const c = cell.dataset.col;
-        const value = board[r][c];
+    // Update my board (p1-grid)
+    const myCells = document.querySelectorAll('#p1-grid .cell');
+    myCells.forEach(cell => {
+        const r = parseInt(cell.dataset.row);
+        const c = parseInt(cell.dataset.col);
+        const value = gameState.myBoard[r][c];
         
-        cell.className = "cell"; // Reset
-        if (value === 1 && gameState === "placement") cell.classList.add("ship");
+        cell.className = "cell";
+        if (value === 1 && gameState.phase === 'placement') cell.classList.add("ship");
         if (value === 2) cell.classList.add("miss");
         if (value === 3) cell.classList.add("hit");
+    });
+    
+    // Update enemy board (p2-grid) - only show hits and misses
+    const enemyCells = document.querySelectorAll('#p2-grid .cell');
+    enemyCells.forEach(cell => {
+        const r = parseInt(cell.dataset.row);
+        const c = parseInt(cell.dataset.col);
+        const value = gameState.enemyBoard[r][c];
+        
+        cell.className = "cell";
+        if (value === 2) cell.classList.add("miss");
+        if (value === 3) cell.classList.add("hit");
+        // Never show enemy ships
     });
 }
 
 function updateInstruction() {
     const text = document.getElementById("instruction-text");
-    if (gameState === "placement") {
-        text.innerText = `Player ${currentPlayer}: Place Ship (Size ${SHIP_SIZES[currentShipIndex]})`;
-    } else {
-        text.innerText = `Player ${currentPlayer}: Fire at the enemy!`;
+    const status = document.getElementById("game-status");
+    
+    if (gameState.phase === 'placement') {
+        if (gameState.myTurn) {
+            text.innerText = `Place Ship (Size ${SHIP_SIZES[gameState.currentShipIndex]})`;
+            status.innerText = "Mode: Placement - Your turn";
+        } else {
+            text.innerText = "Waiting for opponent...";
+            status.innerText = "Mode: Placement - Opponent's turn";
+        }
+    } else if (gameState.phase === 'battle') {
+        if (gameState.myTurn) {
+            text.innerText = "Fire at the enemy!";
+            status.innerText = "Mode: Battle - Your turn";
+        } else {
+            text.innerText = "Waiting for opponent's move...";
+            status.innerText = "Mode: Battle - Opponent's turn";
+        }
     }
 }
 
-// Orientation toggle button
-document.getElementById("rotate-btn").addEventListener("click", (e) => {
-    isHorizontal = !isHorizontal;
-    e.target.innerText = `Orientation: ${isHorizontal ? "Horizontal" : "Vertical"}`;
+// --- 7. LOBBY MANAGEMENT ---
+function createRoom() {
+    const playerName = document.getElementById('player-name').value.trim();
+    if (!playerName) {
+        alert('Please enter your name');
+        return;
+    }
+    
+    if (!isConnected) {
+        alert('Not connected to server');
+        return;
+    }
+    
+    ws.send(JSON.stringify({
+        type: 'createRoom',
+        playerName: playerName
+    }));
+}
+
+function joinRoom() {
+    const playerName = document.getElementById('player-name').value.trim();
+    const roomCodeInput = document.getElementById('room-code').value.trim().toUpperCase();
+    
+    if (!playerName || !roomCodeInput) {
+        alert('Please enter your name and room code');
+        return;
+    }
+    
+    if (!isConnected) {
+        alert('Not connected to server');
+        return;
+    }
+    
+    ws.send(JSON.stringify({
+        type: 'joinRoom',
+        playerName: playerName,
+        roomCode: roomCodeInput
+    }));
+}
+
+function leaveRoom() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+    }
+    location.reload();
+}
+
+// --- 8. EVENT LISTENERS ---
+document.getElementById('create-room-btn').addEventListener('click', createRoom);
+document.getElementById('join-room-btn').addEventListener('click', joinRoom);
+document.getElementById('leave-room-btn').addEventListener('click', leaveRoom);
+
+document.getElementById('rotate-btn').addEventListener('click', () => {
+    gameState.isHorizontal = !gameState.isHorizontal;
+    document.getElementById('rotate-btn').innerText = 
+        `Orientation: ${gameState.isHorizontal ? 'Horizontal' : 'Vertical'}`;
 });
 
-// Run start
-createGrid(1);
-createGrid(2);
+// Allow Enter key to create/join room
+document.getElementById('player-name').addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+        const roomCodeInput = document.getElementById('room-code').value.trim();
+        if (roomCodeInput) {
+            joinRoom();
+        } else {
+            createRoom();
+        }
+    }
+});
+
+document.getElementById('room-code').addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+        joinRoom();
+    }
+});
+
+// --- 9. INITIALIZATION ---
+document.addEventListener('DOMContentLoaded', () => {
+    connectToServer();
+});

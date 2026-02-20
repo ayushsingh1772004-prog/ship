@@ -2,46 +2,64 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Simple Ship Battle</title>
-    <!-- Link the CSS file for styling -->
+    <title>Ship Battle - Multiplayer</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-    <div id="game-info">
-        <h1>Ship Battle</h1>
-        <!-- This heading tells players what to do (e.g., "Player 1 Place Ships") -->
-        <h2 id="instruction-text">Player 1: Place your Ship (Length: 5)</h2>
-        <p id="game-status">Mode: Placement</p>
-        
-        <div class="controls">
-            <!-- Button to flip ship orientation -->
-            <button id="rotate-btn">Orientation: Horizontal</button>
-            <!-- Button to restart the game -->
-            <button onclick="location.reload()">Restart Game</button>
+    <!-- Lobby Screen -->
+    <div id="lobby-screen" class="screen">
+        <h1>Ship Battle - Multiplayer</h1>
+        <div class="lobby-container">
+            <div class="form-group">
+                <input type="text" id="player-name" placeholder="Enter your name" maxlength="20">
+            </div>
+            <div class="lobby-buttons">
+                <button id="create-room-btn">Create Room</button>
+                <div class="join-group">
+                    <input type="text" id="room-code" placeholder="Enter room code" maxlength="6">
+                    <button id="join-room-btn">Join Room</button>
+                </div>
+            </div>
+            <div id="room-info" class="hidden">
+                <p>Room Code: <strong id="current-room-code"></strong></p>
+                <p>Players: <span id="player-count">1</span>/2</p>
+                <p id="connection-status">Waiting for opponent...</p>
+            </div>
         </div>
     </div>
 
-    <!-- Container for Player 1's board -->
-    <div id="p1-area" class="board-container">
-        <h3>Player 1's Ocean</h3>
-        <div id="p1-grid" class="grid-layout"></div>
+    <!-- Game Screen -->
+    <div id="game-screen" class="screen hidden">
+        <div id="game-info">
+            <h1>Ship Battle</h1>
+            <h2 id="instruction-text">Place your Ship (Length: 5)</h2>
+            <p id="game-status">Mode: Placement</p>
+            <p id="room-display">Room: <span id="game-room-code"></span></p>
+            
+            <div class="controls">
+                <button id="rotate-btn">Orientation: Horizontal</button>
+                <button id="leave-room-btn">Leave Room</button>
+            </div>
+        </div>
+
+        <div id="p1-area" class="board-container">
+            <h3>Your Ocean</h3>
+            <div id="p1-grid" class="grid-layout"></div>
+        </div>
+
+        <div id="p2-area" class="board-container hidden">
+            <h3>Enemy Ocean</h3>
+            <div id="p2-grid" class="grid-layout"></div>
+        </div>
     </div>
 
-    <!-- Container for Player 2's board (hidden at start) -->
-    <div id="p2-area" class="board-container hidden">
-        <h3>Player 2's Ocean</h3>
-        <div id="p2-grid" class="grid-layout"></div>
+    <!-- Connection overlay -->
+    <div id="connection-overlay" class="overlay hidden">
+        <h1 id="overlay-title">CONNECTING...</h1>
+        <p id="overlay-message">Please wait...</p>
     </div>
 
-    <!-- The 5-second transition screen used to hide ships between players -->
-    <div id="pass-device-screen" class="overlay hidden">
-        <h1>PASS THE DEVICE</h1>
-        <p>Hand the computer to the next player...</p>
-        <h2 id="countdown-timer">5</h2>
-    </div>
-
-    <!-- Link the JavaScript file for logic -->
     <script src="script.js"></script>
 </body>
 </html>
