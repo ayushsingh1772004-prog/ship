@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Simple Ship Battle</title>
+    <!-- Link the CSS file for styling -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div id="game-info">
+        <h1>Ship Battle</h1>
+        <!-- This heading tells players what to do (e.g., "Player 1 Place Ships") -->
+        <h2 id="instruction-text">Player 1: Place your Ship (Length: 5)</h2>
+        <p id="game-status">Mode: Placement</p>
+        
+        <div class="controls">
+            <!-- Button to flip ship orientation -->
+            <button id="rotate-btn">Orientation: Horizontal</button>
+            <!-- Button to restart the game -->
+            <button onclick="location.reload()">Restart Game</button>
+        </div>
+    </div>
+
+    <!-- Container for Player 1's board -->
+    <div id="p1-area" class="board-container">
+        <h3>Player 1's Ocean</h3>
+        <div id="p1-grid" class="grid-layout"></div>
+    </div>
+
+    <!-- Container for Player 2's board (hidden at start) -->
+    <div id="p2-area" class="board-container hidden">
+        <h3>Player 2's Ocean</h3>
+        <div id="p2-grid" class="grid-layout"></div>
+    </div>
+
+    <!-- The 5-second transition screen used to hide ships between players -->
+    <div id="pass-device-screen" class="overlay hidden">
+        <h1>PASS THE DEVICE</h1>
+        <p>Hand the computer to the next player...</p>
+        <h2 id="countdown-timer">5</h2>
+    </div>
+
+    <!-- Link the JavaScript file for logic -->
+    <script src="script.js"></script>
+</body>
+</html>
