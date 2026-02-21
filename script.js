@@ -3,15 +3,16 @@ const ROWS = 7;
 const COLS = 9;
 const SHIP_SIZES = [5, 4, 3, 3, 2];
 
-// Multiplayer state
-let ws = null;
+// Netlify-specific state
 let playerNumber = null;
 let roomCode = null;
+let playerId = null;
 let isConnected = false;
+let pollInterval = null;
 
 // Game state
 let gameState = {
-    phase: 'lobby', // lobby, placement, battle
+    phase: 'lobby',
     currentPlayer: 1,
     currentShipIndex: 0,
     isHorizontal: true,
@@ -20,201 +21,88 @@ let gameState = {
     myTurn: false
 };
 
-// --- 2. CONNECTION MANAGEMENT ---
-let useWebSocket = true;
-let pollInterval = null;
-
-function connectToServer() {
-    // First try WebSocket
-    if (useWebSocket) {
-        tryWebSocket();
-    } else {
-        usePolling();
-    }
-}
-
-function tryWebSocket() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
-    
+// --- 2. NETLIFY API COMMUNICATION ---
+async function apiCall(endpoint, data = {}) {
     try {
-        ws = new WebSocket(wsUrl);
+        console.log(`API call: POST /.netlify/functions/game${endpoint}`, data);
+        const response = await fetch(`/.netlify/functions/game${endpoint}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(data)
+        });
         
-        ws.onopen = () => {
-            console.log('Connected to server via WebSocket');
-            isConnected = true;
-            hideOverlay();
-            useWebSocket = true;
-        };
-        
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            handleServerMessage(data);
-        };
-        
-        ws.onclose = () => {
-            console.log('WebSocket disconnected');
-            isConnected = false;
-            // Fallback to polling if WebSocket fails
-            if (useWebSocket) {
-                console.log('Falling back to polling');
-                useWebSocket = false;
-                setTimeout(connectToServer, 1000);
+        if (!response.ok) {
+            let errorMessage = `HTTP ${response.status}`;
+            try {
+                const error = await response.json();
+                errorMessage = error.error || error.message || errorMessage;
+            } catch (e) {
+                errorMessage = `HTTP ${response.status}: ${response.statusText}`;
             }
-        };
+            throw new Error(errorMessage);
+        }
         
-        ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            useWebSocket = false;
-            setTimeout(connectToServer, 1000);
-        };
-        
-        // Timeout fallback
-        setTimeout(() => {
-            if (ws && ws.readyState === WebSocket.CONNECTING) {
-                ws.close();
-                useWebSocket = false;
-                connectToServer();
-            }
-        }, 5000);
-        
+        const result = await response.json();
+        console.log(`API response:`, result);
+        return result;
     } catch (error) {
-        console.error('Failed to create WebSocket:', error);
-        useWebSocket = false;
-        usePolling();
+        console.error('API call error:', error);
+        throw error;
     }
 }
 
-function usePolling() {
-    console.log('Using HTTP polling for communication');
+async function getGameState() {
+    try {
+        const response = await fetch(`/.netlify/functions/game/${roomCode}`);
+        if (response.ok) {
+            return await response.json();
+        } else {
+            console.error(`Get game state error: HTTP ${response.status}`);
+        }
+    } catch (error) {
+        console.error('Get game state error:', error);
+    }
+    return null;
+}
+
+// --- 3. CONNECTION MANAGEMENT ---
+async function connectToServer() {
+    console.log('Connecting to Netlify functions...');
     isConnected = true;
     hideOverlay();
-    
-    // Start polling for updates
-    startPolling();
 }
 
 function startPolling() {
     if (pollInterval) clearInterval(pollInterval);
     
     pollInterval = setInterval(async () => {
-        if (!roomCode || !playerNumber) return;
+        if (!roomCode || gameState.phase === 'lobby') return;
         
-        try {
-            const response = await fetch(`/api/game/${roomCode}?player=${playerNumber}`);
-            if (response.ok) {
-                const data = await response.json();
-                if (data.messages && data.messages.length > 0) {
-                    data.messages.forEach(msg => handleServerMessage(msg));
-                }
-            }
-        } catch (error) {
-            console.error('Polling error:', error);
+        const state = await getGameState();
+        if (state && state.gameState) {
+            updateGameState(state.gameState);
         }
-    }, 1000);
+    }, 2000);
 }
 
-function sendToServer(data) {
-    if (useWebSocket && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(data));
-    } else {
-        // Fallback to HTTP POST
-        fetch('/api/game', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(data)
-        }).catch(error => {
-            console.error('HTTP send error:', error);
-        });
-    }
-}
-
-// --- 3. SERVER MESSAGE HANDLING ---
-function handleServerMessage(data) {
-    switch (data.type) {
-        case 'roomCreated':
-            roomCode = data.roomCode;
-            playerNumber = data.playerNumber;
-            showRoomInfo();
-            break;
-            
-        case 'roomJoined':
-            roomCode = data.roomCode;
-            playerNumber = data.playerNumber;
-            showRoomInfo();
-            break;
-            
-        case 'playerJoined':
-            updatePlayerCount(data.totalPlayers);
-            if (data.totalPlayers === 2) {
-                document.getElementById('connection-status').textContent = 'Opponent connected! Starting game...';
-            }
-            break;
-            
-        case 'gameStart':
-            gameState.phase = 'placement';
-            gameState.myTurn = (data.playerNumber === playerNumber);
-            setTimeout(() => {
-                showGameScreen();
-                initializeGame();
-            }, 1000);
-            break;
-            
-        case 'placementComplete':
-            if (data.nextPlayer === playerNumber) {
-                gameState.myTurn = true;
-                gameState.currentShipIndex = 0;
-                updateInstruction();
-            }
-            break;
-            
-        case 'shipPlaced':
-            if (data.playerNumber === playerNumber) {
-                gameState.myBoard = data.board;
-                gameState.currentShipIndex++;
-                updateInstruction();
-            }
-            refreshVisuals();
-            break;
-            
-        case 'battleStart':
-            gameState.phase = 'battle';
-            gameState.myTurn = (data.playerNumber === playerNumber);
-            showBattlePhase();
-            break;
-            
-        case 'shotFired':
-            const isMyBoard = (data.playerNumber !== playerNumber);
-            const targetBoard = isMyBoard ? gameState.myBoard : gameState.enemyBoard;
-            
-            // Update the board with shot result
-            if (data.hit) {
-                targetBoard[data.row][data.col] = 3; // Hit
-            } else {
-                targetBoard[data.row][data.col] = 2; // Miss
-            }
-            
-            if (isMyBoard) {
-                gameState.myBoard = targetBoard;
-            } else {
-                gameState.enemyBoard = targetBoard;
-            }
-            
-            refreshVisuals();
-            
-            if (data.gameOver) {
-                showGameOver(data.playerNumber === playerNumber);
-            } else {
-                gameState.myTurn = (data.nextPlayer === playerNumber);
-                updateInstruction();
-            }
-            break;
-            
-        case 'error':
-            alert(data.message);
-            break;
+function updateGameState(serverState) {
+    // Update local game state based on server state
+    if (serverState.phase === 'placement' && gameState.phase === 'placement') {
+        if (serverState.currentPlayer === playerNumber && !gameState.myTurn) {
+            gameState.myTurn = true;
+            gameState.currentShipIndex = serverState.currentShipIndex;
+            updateInstruction();
+        }
+    } else if (serverState.phase === 'battle' && gameState.phase !== 'battle') {
+        gameState.phase = 'battle';
+        showBattlePhase();
+    } else if (serverState.phase === 'battle') {
+        if (serverState.currentPlayer === playerNumber && !gameState.myTurn) {
+            gameState.myTurn = true;
+            updateInstruction();
+        }
     }
 }
 
@@ -233,10 +121,6 @@ function showRoomInfo() {
     document.getElementById('room-info').classList.remove('hidden');
     document.getElementById('current-room-code').textContent = roomCode;
     document.getElementById('player-count').textContent = '1';
-}
-
-function updatePlayerCount(count) {
-    document.getElementById('player-count').textContent = count;
 }
 
 function showGameScreen() {
@@ -263,11 +147,12 @@ function initializeGame() {
     createGrid('p2');
     updateInstruction();
     refreshVisuals();
+    startPolling();
 }
 
 function createGrid(playerId) {
     const gridElement = document.getElementById(`${playerId}-grid`);
-    gridElement.innerHTML = ''; // Clear existing grid
+    gridElement.innerHTML = '';
     
     for (let r = 0; r < ROWS; r++) {
         for (let c = 0; c < COLS; c++) {
@@ -282,38 +167,87 @@ function createGrid(playerId) {
 }
 
 // --- 6. GAME LOGIC ---
-function handleCellClick(r, c) {
+async function handleCellClick(r, c) {
     if (!isConnected) return;
     
     if (gameState.phase === 'placement' && gameState.myTurn) {
-        sendPlacementMove(r, c);
+        await sendPlacementMove(r, c);
     } else if (gameState.phase === 'battle' && gameState.myTurn) {
-        // Only allow clicking on enemy board during battle
         if (event.target.closest('#p2-grid')) {
-            sendBattleMove(r, c);
+            await sendBattleMove(r, c);
         }
     }
 }
 
-function sendPlacementMove(r, c) {
-    sendToServer({
-        type: 'gameMove',
-        row: r,
-        col: c,
-        isHorizontal: gameState.isHorizontal
-    });
+async function sendPlacementMove(r, c) {
+    try {
+        const result = await apiCall('', {
+            type: 'gameMove',
+            roomCode,
+            playerId,
+            row: r,
+            col: c,
+            isHorizontal: gameState.isHorizontal
+        });
+        
+        if (result.success) {
+            // Update local board
+            const size = SHIP_SIZES[gameState.currentShipIndex];
+            for (let i = 0; i < size; i++) {
+                if (gameState.isHorizontal) {
+                    gameState.myBoard[r][c + i] = 1;
+                } else {
+                    gameState.myBoard[r + i][c] = 1;
+                }
+            }
+            
+            gameState.currentShipIndex++;
+            gameState.myTurn = false;
+            refreshVisuals();
+            updateInstruction();
+        } else if (result.error) {
+            alert(result.error);
+        }
+    } catch (error) {
+        alert('Failed to place ship: ' + error.message);
+    }
 }
 
-function sendBattleMove(r, c) {
-    sendToServer({
-        type: 'gameMove',
-        row: r,
-        col: c
-    });
+async function sendBattleMove(r, c) {
+    try {
+        const result = await apiCall('', {
+            type: 'gameMove',
+            roomCode,
+            playerId,
+            row: r,
+            col: c
+        });
+        
+        if (result.success) {
+            // Update enemy board with shot result
+            if (result.hit) {
+                gameState.enemyBoard[r][c] = 3;
+            } else {
+                gameState.enemyBoard[r][c] = 2;
+            }
+            
+            gameState.myTurn = false;
+            refreshVisuals();
+            updateInstruction();
+            
+            if (result.gameOver) {
+                showGameOver(result.nextPlayer === playerNumber);
+            }
+        } else if (result.error) {
+            alert(result.error);
+        }
+    } catch (error) {
+        alert('Failed to fire shot: ' + error.message);
+    }
 }
 
 function refreshVisuals() {
-    // Update my board (p1-grid)
+    // Update my board
     const myCells = document.querySelectorAll('#p1-grid .cell');
     myCells.forEach(cell => {
         const r = parseInt(cell.dataset.row);
@@ -326,7 +260,7 @@ function refreshVisuals() {
         if (value === 3) cell.classList.add("hit");
     });
     
-    // Update enemy board (p2-grid) - only show hits and misses
+    // Update enemy board
     const enemyCells = document.querySelectorAll('#p2-grid .cell');
     enemyCells.forEach(cell => {
         const r = parseInt(cell.dataset.row);
@@ -336,7 +270,6 @@ function refreshVisuals() {
         cell.className = "cell";
         if (value === 2) cell.classList.add("miss");
         if (value === 3) cell.classList.add("hit");
-        // Never show enemy ships
     });
 }
 
@@ -364,25 +297,36 @@ function updateInstruction() {
 }
 
 // --- 7. LOBBY MANAGEMENT ---
-function createRoom() {
+async function createRoom() {
     const playerName = document.getElementById('player-name').value.trim();
     if (!playerName) {
         alert('Please enter your name');
         return;
     }
     
-    if (!isConnected) {
-        alert('Not connected to server');
-        return;
+    try {
+        const result = await apiCall('', {
+            type: 'createRoom',
+            playerName: playerName
+        });
+        
+        roomCode = result.roomCode;
+        playerNumber = result.playerNumber;
+        playerId = result.playerId;
+        
+        showRoomInfo();
+        
+        // Wait for second player
+        setTimeout(() => {
+            checkGameStart();
+        }, 2000);
+        
+    } catch (error) {
+        alert('Failed to create room: ' + error.message);
     }
-    
-    sendToServer({
-        type: 'createRoom',
-        playerName: playerName
-    });
 }
 
-function joinRoom() {
+async function joinRoom() {
     const playerName = document.getElementById('player-name').value.trim();
     const roomCodeInput = document.getElementById('room-code').value.trim().toUpperCase();
     
@@ -391,22 +335,40 @@ function joinRoom() {
         return;
     }
     
-    if (!isConnected) {
-        alert('Not connected to server');
-        return;
+    try {
+        const result = await apiCall('', {
+            type: 'joinRoom',
+            playerName: playerName,
+            roomCode: roomCodeInput
+        });
+        
+        roomCode = result.roomCode;
+        playerNumber = result.playerNumber;
+        playerId = result.playerId;
+        
+        showRoomInfo();
+        showGameScreen();
+        initializeGame();
+        
+    } catch (error) {
+        alert('Failed to join room: ' + error.message);
     }
-    
-    sendToServer({
-        type: 'joinRoom',
-        playerName: playerName,
-        roomCode: roomCodeInput
-    });
+}
+
+async function checkGameStart() {
+    const state = await getGameState();
+    if (state && state.gameState.phase === 'placement') {
+        showGameScreen();
+        initializeGame();
+        gameState.myTurn = (state.gameState.currentPlayer === playerNumber);
+        updateInstruction();
+    } else {
+        setTimeout(checkGameStart, 2000);
+    }
 }
 
 function leaveRoom() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close();
-    }
+    if (pollInterval) clearInterval(pollInterval);
     location.reload();
 }
 
