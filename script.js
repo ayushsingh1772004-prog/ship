@@ -20,35 +20,115 @@ let gameState = {
     myTurn: false
 };
 
-// --- 2. WEBSOCKET CONNECTION ---
+// --- 2. CONNECTION MANAGEMENT ---
+let useWebSocket = true;
+let pollInterval = null;
+
 function connectToServer() {
+    // First try WebSocket
+    if (useWebSocket) {
+        tryWebSocket();
+    } else {
+        usePolling();
+    }
+}
+
+function tryWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}`;
     
-    ws = new WebSocket(wsUrl);
+    try {
+        ws = new WebSocket(wsUrl);
+        
+        ws.onopen = () => {
+            console.log('Connected to server via WebSocket');
+            isConnected = true;
+            hideOverlay();
+            useWebSocket = true;
+        };
+        
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            handleServerMessage(data);
+        };
+        
+        ws.onclose = () => {
+            console.log('WebSocket disconnected');
+            isConnected = false;
+            // Fallback to polling if WebSocket fails
+            if (useWebSocket) {
+                console.log('Falling back to polling');
+                useWebSocket = false;
+                setTimeout(connectToServer, 1000);
+            }
+        };
+        
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            useWebSocket = false;
+            setTimeout(connectToServer, 1000);
+        };
+        
+        // Timeout fallback
+        setTimeout(() => {
+            if (ws && ws.readyState === WebSocket.CONNECTING) {
+                ws.close();
+                useWebSocket = false;
+                connectToServer();
+            }
+        }, 5000);
+        
+    } catch (error) {
+        console.error('Failed to create WebSocket:', error);
+        useWebSocket = false;
+        usePolling();
+    }
+}
+
+function usePolling() {
+    console.log('Using HTTP polling for communication');
+    isConnected = true;
+    hideOverlay();
     
-    ws.onopen = () => {
-        console.log('Connected to server');
-        isConnected = true;
-        hideOverlay();
-    };
+    // Start polling for updates
+    startPolling();
+}
+
+function startPolling() {
+    if (pollInterval) clearInterval(pollInterval);
     
-    ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        handleServerMessage(data);
-    };
-    
-    ws.onclose = () => {
-        console.log('Disconnected from server');
-        isConnected = false;
-        showOverlay('CONNECTION LOST', 'Trying to reconnect...');
-        setTimeout(connectToServer, 3000);
-    };
-    
-    ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        showOverlay('CONNECTION ERROR', 'Failed to connect to server');
-    };
+    pollInterval = setInterval(async () => {
+        if (!roomCode || !playerNumber) return;
+        
+        try {
+            const response = await fetch(`/api/game/${roomCode}?player=${playerNumber}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.messages && data.messages.length > 0) {
+                    data.messages.forEach(msg => handleServerMessage(msg));
+                }
+            }
+        } catch (error) {
+            console.error('Polling error:', error);
+        }
+    }, 1000);
+}
+
+function sendToServer(data) {
+    if (useWebSocket && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(data));
+    } else {
+        // Fallback to HTTP POST
+        fetch('/api/game', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(data)
+        }).catch(error => {
+            console.error('HTTP send error:', error);
+        });
+    }
 }
 
 // --- 3. SERVER MESSAGE HANDLING ---
@@ -216,20 +296,20 @@ function handleCellClick(r, c) {
 }
 
 function sendPlacementMove(r, c) {
-    ws.send(JSON.stringify({
+    sendToServer({
         type: 'gameMove',
         row: r,
         col: c,
         isHorizontal: gameState.isHorizontal
-    }));
+    });
 }
 
 function sendBattleMove(r, c) {
-    ws.send(JSON.stringify({
+    sendToServer({
         type: 'gameMove',
         row: r,
         col: c
-    }));
+    });
 }
 
 function refreshVisuals() {
@@ -296,10 +376,10 @@ function createRoom() {
         return;
     }
     
-    ws.send(JSON.stringify({
+    sendToServer({
         type: 'createRoom',
         playerName: playerName
-    }));
+    });
 }
 
 function joinRoom() {
@@ -316,11 +396,11 @@ function joinRoom() {
         return;
     }
     
-    ws.send(JSON.stringify({
+    sendToServer({
         type: 'joinRoom',
         playerName: playerName,
         roomCode: roomCodeInput
-    }));
+    });
 }
 
 function leaveRoom() {

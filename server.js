@@ -3,9 +3,19 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-// Create HTTP server to serve static files
+// Create HTTP server to serve static files and handle API requests
 const server = http.createServer((req, res) => {
-    let filePath = path.join(__dirname, req.url === '/' ? 'index.html' : req.url);
+    const url = req.url;
+    const method = req.method;
+    
+    // Handle API endpoints
+    if (url.startsWith('/api/')) {
+        handleApiRequest(req, res);
+        return;
+    }
+    
+    // Serve static files
+    let filePath = path.join(__dirname, url === '/' ? 'index.html' : url);
     const extname = path.extname(filePath);
     let contentType = 'text/html';
 
@@ -33,6 +43,125 @@ const server = http.createServer((req, res) => {
         }
     });
 });
+
+// Handle API requests for polling fallback
+function handleApiRequest(req, res) {
+    const url = req.url;
+    const method = req.method;
+    
+    // Enable CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    
+    if (method === 'OPTIONS') {
+        res.writeHead(200);
+        res.end();
+        return;
+    }
+    
+    if (url.startsWith('/api/game/') && method === 'GET') {
+        // Polling endpoint
+        const parts = url.split('/');
+        const roomCode = parts[3];
+        const playerNum = new URL(url, `http://${req.headers.host}`).searchParams.get('player');
+        
+        const room = rooms.get(roomCode);
+        if (room) {
+            // Get pending messages for this player
+            const player = room.players.find(p => p.number === parseInt(playerNum));
+            if (player) {
+                const messages = player.pendingMessages || [];
+                player.pendingMessages = []; // Clear messages after sending
+                
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ messages }));
+            } else {
+                res.writeHead(404);
+                res.end('Player not found');
+            }
+        } else {
+            res.writeHead(404);
+            res.end('Room not found');
+        }
+    } else if (url === '/api/game' && method === 'POST') {
+        // Handle game moves via HTTP
+        let body = '';
+        req.on('data', chunk => {
+            body += chunk.toString();
+        });
+        
+        req.on('end', () => {
+            try {
+                const data = JSON.parse(body);
+                handleHttpGameMove(data, res);
+            } catch (error) {
+                res.writeHead(400);
+                res.end('Invalid JSON');
+            }
+        });
+    } else {
+        res.writeHead(404);
+        res.end('API endpoint not found');
+    }
+}
+
+// Handle HTTP game moves (for polling fallback)
+function handleHttpGameMove(data, res) {
+    const { type, roomCode, playerName } = data;
+    
+    if (type === 'createRoom') {
+        const newRoomCode = generateRoomCode();
+        const room = new GameRoom(newRoomCode);
+        rooms.set(newRoomCode, room);
+        
+        if (room.addPlayer(null, playerName, true)) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                type: 'roomCreated',
+                roomCode: newRoomCode,
+                playerNumber: 1
+            }));
+        } else {
+            res.writeHead(500);
+            res.end('Failed to create room');
+        }
+    } else if (type === 'joinRoom') {
+        const targetRoom = rooms.get(roomCode);
+        if (targetRoom && targetRoom.players.length < 2) {
+            if (targetRoom.addPlayer(null, playerName, true)) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    type: 'roomJoined',
+                    roomCode: roomCode,
+                    playerNumber: targetRoom.players.length
+                }));
+            } else {
+                res.writeHead(500);
+                res.end('Failed to join room');
+            }
+        } else {
+            res.writeHead(404);
+            res.end('Room not found or full');
+        }
+    } else if (type === 'gameMove') {
+        // Find the room and handle the move
+        for (const [code, room] of rooms) {
+            const player = room.players.find(p => p.isHttp);
+            if (player) {
+                room.handleMove(null, data, true);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true }));
+                return;
+            }
+        }
+        res.writeHead(404);
+        res.end('Room not found');
+    } else {
+        res.writeHead(400);
+        res.end('Invalid request type');
+    }
+}
 
 // Create WebSocket server
 const wss = new WebSocket.Server({ server });
@@ -62,19 +191,23 @@ class GameRoom {
         };
     }
 
-    addPlayer(ws, playerName) {
+    addPlayer(ws, playerName, isHttp = false) {
         if (this.players.length >= 2) return false;
         
         const playerNum = this.players.length + 1;
         const player = {
             ws,
             name: playerName,
-            number: playerNum
+            number: playerNum,
+            isHttp,
+            pendingMessages: []
         };
         
         this.players.push(player);
-        ws.room = this;
-        ws.playerNumber = playerNum;
+        if (!isHttp) {
+            ws.room = this;
+            ws.playerNumber = playerNum;
+        }
         
         // Notify all players in room
         this.broadcast({
@@ -109,28 +242,40 @@ class GameRoom {
 
     broadcast(message) {
         this.players.forEach(player => {
-            if (player.ws.readyState === WebSocket.OPEN) {
+            if (player.isHttp) {
+                // Store message for HTTP polling
+                if (!player.pendingMessages) player.pendingMessages = [];
+                player.pendingMessages.push(message);
+            } else if (player.ws && player.ws.readyState === WebSocket.OPEN) {
                 player.ws.send(JSON.stringify(message));
             }
         });
     }
 
-    handleMove(ws, data) {
-        if (ws.playerNumber !== this.gameState.currentPlayer) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Not your turn!' }));
+    handleMove(ws, data, isHttp = false) {
+        const player = this.players.find(p => 
+            isHttp ? p.isHttp : p.ws === ws
+        );
+        
+        if (!player) return;
+        
+        if (player.number !== this.gameState.currentPlayer) {
+            if (!isHttp) {
+                ws.send(JSON.stringify({ type: 'error', message: 'Not your turn!' }));
+            }
             return;
         }
 
         if (this.gameState.phase === 'placement') {
-            this.handlePlacement(ws, data);
+            this.handlePlacement(player, data);
         } else if (this.gameState.phase === 'battle') {
-            this.handleBattle(ws, data);
+            this.handleBattle(player, data);
         }
     }
 
-    handlePlacement(ws, data) {
+    handlePlacement(player, data) {
         const { row, col, isHorizontal } = data;
-        const board = ws.playerNumber === 1 ? this.gameState.p1Board : this.gameState.p2Board;
+        const board = player.number === 1 ? this.gameState.p1Board : this.gameState.p2Board;
         const size = this.gameState.shipSizes[this.gameState.currentShipIndex];
 
         if (this.canPlaceShip(board, row, col, size, isHorizontal)) {
@@ -148,7 +293,7 @@ class GameRoom {
 
             // Check if current player finished placing ships
             if (this.gameState.currentShipIndex >= this.gameState.shipSizes.length) {
-                if (ws.playerNumber === 1) {
+                if (player.number === 1) {
                     this.gameState.p1ShipsPlaced = true;
                     this.gameState.currentShipIndex = 0;
                     this.gameState.currentPlayer = 2;
@@ -175,22 +320,26 @@ class GameRoom {
             } else {
                 this.broadcast({
                     type: 'shipPlaced',
-                    playerNumber: ws.playerNumber,
-                    board: ws.playerNumber === 1 ? this.gameState.p1Board : this.gameState.p2Board,
+                    playerNumber: player.number,
+                    board: player.number === 1 ? this.gameState.p1Board : this.gameState.p2Board,
                     nextShipSize: this.gameState.shipSizes[this.gameState.currentShipIndex]
                 });
             }
         } else {
-            ws.send(JSON.stringify({ type: 'error', message: 'Cannot place ship there!' }));
+            if (!player.isHttp) {
+                player.ws.send(JSON.stringify({ type: 'error', message: 'Cannot place ship there!' }));
+            }
         }
     }
 
-    handleBattle(ws, data) {
+    handleBattle(player, data) {
         const { row, col } = data;
-        const targetBoard = ws.playerNumber === 1 ? this.gameState.p2Board : this.gameState.p1Board;
+        const targetBoard = player.number === 1 ? this.gameState.p2Board : this.gameState.p1Board;
 
         if (targetBoard[row][col] > 1) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Already fired at this location!' }));
+            if (!player.isHttp) {
+                player.ws.send(JSON.stringify({ type: 'error', message: 'Already fired at this location!' }));
+            }
             return;
         }
 
@@ -207,17 +356,17 @@ class GameRoom {
 
         this.broadcast({
             type: 'shotFired',
-            playerNumber: ws.playerNumber,
+            playerNumber: player.number,
             row,
             col,
             hit,
             gameOver,
             targetBoard: targetBoard,
-            nextPlayer: gameOver ? ws.playerNumber : (ws.playerNumber === 1 ? 2 : 1)
+            nextPlayer: gameOver ? player.number : (player.number === 1 ? 2 : 1)
         });
 
         if (!gameOver) {
-            this.gameState.currentPlayer = ws.playerNumber === 1 ? 2 : 1;
+            this.gameState.currentPlayer = player.number === 1 ? 2 : 1;
         }
     }
 
