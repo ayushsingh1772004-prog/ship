@@ -153,6 +153,7 @@ exports.handler = async (event, context) => {
     
     // Get the actual path - netlify uses 'rawPath' in newer versions
     const actualPath = rawPath || path || '';
+    const pathname = new URL(`http://example.com${actualPath}`).pathname;
     
     // Parse body - it might be a string or already parsed
     let data = {};
@@ -168,7 +169,7 @@ exports.handler = async (event, context) => {
         }
     }
     
-    console.log(`${httpMethod} ${actualPath}`, { body, data });
+    console.log(`${httpMethod} ${pathname}`, { body, data });
     
     // Enable CORS
     const headers = {
@@ -188,8 +189,142 @@ exports.handler = async (event, context) => {
 
     try {
         // Handle POST requests (create room, join room, make moves)
-        if (httpMethod === 'POST' && (actualPath === '/.netlify/functions/game' || actualPath === '/game' || actualPath.endsWith('/game'))) {
+        // Match patterns: /.netlify/functions/game, /game, /api/game
+        if (httpMethod === 'POST' && (pathname.includes('game'))) {
             const { type, roomCode, playerName, playerId } = data;
+            
+            if (type === 'createRoom') {
+                const newRoomCode = generateRoomCode();
+                const room = new GameRoom(newRoomCode);
+                rooms.set(newRoomCode, room);
+                
+                const newPlayerId = `p1_${Date.now()}`;
+                room.addPlayer(newPlayerId, playerName);
+                
+                console.log(`Room created: ${newRoomCode}`);
+                
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        type: 'roomCreated',
+                        roomCode: newRoomCode,
+                        playerNumber: 1,
+                        playerId: newPlayerId
+                    })
+                };
+            }
+            
+            else if (type === 'joinRoom') {
+                const room = rooms.get(roomCode);
+                if (!room || room.players.length >= 2) {
+                    console.log(`Could not join room ${roomCode}, exists:${!!room}, players:${room?.players.length}`);
+                    return {
+                        statusCode: 404,
+                        headers,
+                        body: JSON.stringify({ error: 'Room not found or full' })
+                    };
+                }
+                
+                const newPlayerId = `p2_${Date.now()}`;
+                room.addPlayer(newPlayerId, playerName);
+                
+                console.log(`Player joined room: ${roomCode}`);
+                
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        type: 'roomJoined',
+                        roomCode,
+                        playerNumber: room.players.length,
+                        playerId: newPlayerId,
+                        gameState: room.gameState
+                    })
+                };
+            }
+            
+            else if (type === 'gameMove') {
+                const room = rooms.get(roomCode);
+                if (!room) {
+                    console.log(`Room not found for move: ${roomCode}`);
+                    return {
+                        statusCode: 404,
+                        headers,
+                        body: JSON.stringify({ error: 'Room not found' })
+                    };
+                }
+                
+                const result = room.handleMove(playerId, data);
+                
+                if (result.error) {
+                    return {
+                        statusCode: 400,
+                        headers,
+                        body: JSON.stringify({ type: 'error', message: result.error })
+                    };
+                }
+                
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify({
+                        type: 'moveResult',
+                        ...result
+                    })
+                };
+            }
+            
+            return {
+                statusCode: 400,
+                headers,
+                body: JSON.stringify({ error: 'Invalid request type' })
+            };
+        }
+        
+        // Handle GET requests (poll for game state)
+        // Match patterns for GET requests with room code
+        else if (httpMethod === 'GET' && pathname.includes('game')) {
+            const pathParts = pathname.split('/').filter(p => p && p !== 'netlify' && p !== 'functions');
+            const roomCode = pathParts[pathParts.length - 1];
+            
+            console.log(`Polling for room: ${roomCode}`);
+            
+            const room = rooms.get(roomCode);
+            
+            if (!room) {
+                return {
+                    statusCode: 404,
+                    headers,
+                    body: JSON.stringify({ error: 'Room not found' })
+                };
+            }
+            
+            return {
+                statusCode: 200,
+                headers,
+                body: JSON.stringify({
+                    gameState: room.gameState,
+                    players: room.players.map(p => ({ id: p.id, name: p.name, number: p.number }))
+                })
+            };
+        }
+        
+        return {
+            statusCode: 405,
+            headers,
+            body: JSON.stringify({ error: 'Method not allowed' })
+        };
+        
+    } catch (error) {
+        console.error('Function error:', error);
+        return {
+            statusCode: 500,
+            headers,
+            body: JSON.stringify({ error: 'Internal server error', message: error.message })
+        };
+    }
+};
             
             if (type === 'createRoom') {
                 const newRoomCode = generateRoomCode();
