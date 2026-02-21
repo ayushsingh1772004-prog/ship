@@ -149,11 +149,7 @@ class GameRoom {
 }
 
 exports.handler = async (event, context) => {
-    const { httpMethod, body, rawPath, path, resource, requestContext } = event;
-    
-    // Get the actual path - netlify uses 'rawPath' in newer versions
-    const actualPath = rawPath || path || '';
-    const pathname = new URL(`http://example.com${actualPath}`).pathname;
+    const { httpMethod, body } = event;
     
     // Parse body - it might be a string or already parsed
     let data = {};
@@ -163,13 +159,16 @@ exports.handler = async (event, context) => {
                 data = JSON.parse(body);
             } catch (e) {
                 console.error('Failed to parse body:', body);
+                return {
+                    statusCode: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Invalid JSON body' })
+                };
             }
         } else {
             data = body;
         }
     }
-    
-    console.log(`${httpMethod} ${pathname}`, { body, data });
     
     // Enable CORS
     const headers = {
@@ -179,6 +178,7 @@ exports.handler = async (event, context) => {
         'Content-Type': 'application/json'
     };
 
+    // Handle CORS preflight
     if (httpMethod === 'OPTIONS') {
         return {
             statusCode: 200,
@@ -188,9 +188,8 @@ exports.handler = async (event, context) => {
     }
 
     try {
-        // Handle POST requests (create room, join room, make moves)
-        // Match patterns: /.netlify/functions/game, /game, /api/game
-        if (httpMethod === 'POST' && (pathname.includes('game'))) {
+        // Handle POST requests
+        if (httpMethod === 'POST') {
             const { type, roomCode, playerName, playerId } = data;
             
             if (type === 'createRoom') {
@@ -201,7 +200,7 @@ exports.handler = async (event, context) => {
                 const newPlayerId = `p1_${Date.now()}`;
                 room.addPlayer(newPlayerId, playerName);
                 
-                console.log(`Room created: ${newRoomCode}`);
+                console.log(`✓ Room created: ${newRoomCode}`);
                 
                 return {
                     statusCode: 200,
@@ -218,7 +217,7 @@ exports.handler = async (event, context) => {
             else if (type === 'joinRoom') {
                 const room = rooms.get(roomCode);
                 if (!room || room.players.length >= 2) {
-                    console.log(`Could not join room ${roomCode}, exists:${!!room}, players:${room?.players.length}`);
+                    console.log(`✗ Could not join room ${roomCode}`);
                     return {
                         statusCode: 404,
                         headers,
@@ -229,7 +228,7 @@ exports.handler = async (event, context) => {
                 const newPlayerId = `p2_${Date.now()}`;
                 room.addPlayer(newPlayerId, playerName);
                 
-                console.log(`Player joined room: ${roomCode}`);
+                console.log(`✓ Player joined room: ${roomCode}`);
                 
                 return {
                     statusCode: 200,
@@ -247,7 +246,7 @@ exports.handler = async (event, context) => {
             else if (type === 'gameMove') {
                 const room = rooms.get(roomCode);
                 if (!room) {
-                    console.log(`Room not found for move: ${roomCode}`);
+                    console.log(`✗ Room not found for move: ${roomCode}`);
                     return {
                         statusCode: 404,
                         headers,
@@ -282,13 +281,17 @@ exports.handler = async (event, context) => {
             };
         }
         
-        // Handle GET requests (poll for game state)
-        // Match patterns for GET requests with room code
-        else if (httpMethod === 'GET' && pathname.includes('game')) {
-            const pathParts = pathname.split('/').filter(p => p && p !== 'netlify' && p !== 'functions');
-            const roomCode = pathParts[pathParts.length - 1];
+        // Handle GET requests (room code in query parameter or path)
+        else if (httpMethod === 'GET') {
+            const roomCode = event.queryStringParameters?.room || event.path?.split('/').pop();
             
-            console.log(`Polling for room: ${roomCode}`);
+            if (!roomCode) {
+                return {
+                    statusCode: 400,
+                    headers,
+                    body: JSON.stringify({ error: 'Room code required' })
+                };
+            }
             
             const room = rooms.get(roomCode);
             
@@ -299,6 +302,8 @@ exports.handler = async (event, context) => {
                     body: JSON.stringify({ error: 'Room not found' })
                 };
             }
+            
+            console.log(`✓ Polling room: ${roomCode}`);
             
             return {
                 statusCode: 200,
@@ -321,7 +326,11 @@ exports.handler = async (event, context) => {
         return {
             statusCode: 500,
             headers,
-            body: JSON.stringify({ error: 'Internal server error', message: error.message })
+            body: JSON.stringify({ 
+                error: 'Internal server error', 
+                message: error.message,
+                stack: error.stack 
+            })
         };
     }
 };
